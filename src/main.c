@@ -2,6 +2,7 @@
  *  ShellBat plugin
  *  Copyright (c) 2017 David Rosca
  *  Copyright (c) 2020 Princess of Sleeping
+ *  Copyright (c) 2021 Codiak
  *
  *  Permission is hereby granted, free of charge, to any person obtaining a copy
  *  of this software and associated documentation files (the "Software"), to deal
@@ -22,8 +23,10 @@
 
 #include <psp2/kernel/modulemgr.h>
 #include <psp2/kernel/threadmgr.h>
+#include <psp2/ctrl.h>
 #include <psp2/paf.h>
 #include <psp2/power.h>
+#include <psp2/rtc.h>
 #include <psp2/sysmodule.h>
 #include <taihen.h>
 #include "taihen_extra.h"
@@ -39,19 +42,21 @@
 #define HookImport(module_name, library_nid, func_nid, func_name) \
 	taiHookFunctionImport(&func_name ## _ref, module_name, library_nid, func_nid, func_name ## _patch)
 
-
-
 SceWChar16 *sce_paf_private_wcschr(const SceWChar16 *s, SceWChar16 c);
 SceWChar16 *sce_paf_private_wcsncpy(SceWChar16 *dst, const SceWChar16 *src, SceSize n);
 int sce_paf_private_swprintf(SceWChar16 *dst, SceSize len, SceWChar16 *fmt, ...);
 int scePafWidgetSetFontSize(void *widget, float size, int unk0, int pos, int len);
+void pulse_state(int pulse_freq, int pulse_reset);
 
 SceWChar16 cached_strings[0x64];
 SceKernelSysClock prevIdleClock[4];
 
-int pos_percent_cpu;
 int pos_percent_battery;
 int prev_percent_battery;
+int pos_controller_battery;
+int pulse_controller_battery;
+SceUInt8 prev_battery_level, ctrl_battery_level;
+SceRtcTick pulse_tick0, pulse_tick1;
 
 tai_hook_ref_t scePafWidgetSetFontSize_ref;
 int scePafWidgetSetFontSize_patch(void *pWidget, float size, int unk0, int pos, SceSize len){
@@ -70,27 +75,16 @@ int scePafWidgetSetFontSize_patch(void *pWidget, float size, int unk0, int pos, 
 			scePafWidgetSetFontSize(pWidget, 16.0f, 1, (int)(pMStr - cached_strings) - 2, 3);
 		}
 
-		if(pos_percent_battery != 0){
-			scePafWidgetSetFontSize(pWidget, 16.0f, 1, pos_percent_battery, 1);
+		if(pos_controller_battery != 0){
+			scePafWidgetSetFontSize(pWidget, 16.0f, 1, pos_controller_battery, 0);
 		}
 
-		if(pos_percent_cpu != 0){
-			scePafWidgetSetFontSize(pWidget, 16.0f, 1, pos_percent_cpu, 1);
+		if(pos_percent_battery != 0){
+			scePafWidgetSetFontSize(pWidget, 16.0f, 1, pos_percent_battery, 0);
 		}
 	}
 
 	return res;
-}
-
-int getCpuUsagePercent(int core, uint64_t val);
-
-int updateCpuUsagePercent(int core, SceKernelSystemInfo *info){
-
-	int cpu = getCpuUsagePercent(core, info->cpuInfo[core].idleClock - prevIdleClock[core]);
-
-	prevIdleClock[core] = info->cpuInfo[core].idleClock;
-
-	return cpu;
 }
 
 tai_hook_ref_t scePafGetTimeDataStrings_ref;
@@ -101,39 +95,81 @@ int scePafGetTimeDataStrings_patch(ScePafDateTime *data, SceWChar16 *dst, SceSiz
 
 	int res = 0, out_len = 0;
 
-	if(0 /* is_disp_cpu */){
-
-		SceKernelSystemInfo info;
-		info.size = sizeof(info);
-
-		sceKernelGetSystemInfo(&info);
-
-		int cpu = 0;
-
-		cpu += updateCpuUsagePercent(0, &info);
-		cpu += updateCpuUsagePercent(1, &info);
-		cpu += updateCpuUsagePercent(2, &info);
-		cpu += updateCpuUsagePercent(3, &info);
-
-		res = sce_paf_private_swprintf(&dst[out_len], len, L"CPU %2d%% ", cpu >> 2);
-		out_len += res; len -= res;
-		pos_percent_cpu = out_len - 2;
-	}
-
+	/* is_disp_clock */
 	res = TAI_CONTINUE(int, scePafGetTimeDataStrings_ref, data, &dst[out_len], len, a4, a5);
 	out_len += res; len -= res;
 
-	if(1 /* is_disp_battery */){
-		int percent = scePowerGetBatteryLifePercent();
-		if(percent < 0)
-			percent = prev_percent_battery; // for resume
+	/* is_disp_controller */
+	SceCtrlPortInfo portinfo;
+	sceCtrlGetControllerPortInfo(&portinfo);
 
-		prev_percent_battery = percent;
+	if (portinfo.port[1] == 8) {
+		SceWChar16 battery_indicator[] = L" P1[   ]";
+		sceCtrlGetBatteryInfo(1, &ctrl_battery_level);
+		pulse_controller_battery = prev_battery_level == ctrl_battery_level ? pulse_controller_battery : 0;
+		prev_battery_level = ctrl_battery_level;
 
-		res = sce_paf_private_swprintf(&dst[out_len], len, L" %d%%", percent);
+		switch (ctrl_battery_level) {
+		case 0xEE: // battery is charging [| | |]
+			pulse_state(32, 3);
+			battery_indicator[0x4] = '|';
+			battery_indicator[0x5] = pulse_controller_battery > 1 ? '|' : ' ';
+			battery_indicator[0x6] = pulse_controller_battery > 2 ? '|' : ' ';
+			break;
+		case 0xEF: // battery level is fully charged [|||]
+			battery_indicator[0x4] = '|';
+			battery_indicator[0x5] = '|';
+			battery_indicator[0x6] = '|';
+			break;
+		case 0x5: // battery level is 5 [|| |]
+			pulse_state(16, 2);
+			battery_indicator[0x4] = '|';
+			battery_indicator[0x5] = '|';
+			battery_indicator[0x6] = pulse_controller_battery == 1 ? '|' : ' ';
+			break;
+		case 0x4: // battery level is 4 [|| ]
+			battery_indicator[0x4] = '|';
+			battery_indicator[0x5] = '|';
+			battery_indicator[0x6] = ' ';
+			break;
+		case 0x3: // battery level is 3 [| | ]
+			pulse_state(16, 2);
+			battery_indicator[0x4] = '|';
+			battery_indicator[0x5] = pulse_controller_battery == 1 ? '|' : ' ';
+			battery_indicator[0x6] = ' ';
+			break;
+		case 0x2: // battery level is 2 [|  ]
+		case 0x1: // battery level is 1 [   ]
+			pulse_state(32, 2);
+			battery_indicator[0x1] = pulse_controller_battery == 1 ? 'P' : ' ';
+			battery_indicator[0x2] = pulse_controller_battery == 1 ? '1' : ' ';
+			battery_indicator[0x3] = pulse_controller_battery == 1 ? '[' : ' ';
+			battery_indicator[0x4] = ctrl_battery_level == 0x2 ? '|' : ' ';
+			battery_indicator[0x4] = pulse_controller_battery == 1 ? battery_indicator[0x4] : ' ';
+			battery_indicator[0x5] = ' ';
+			battery_indicator[0x6] = ' ';
+			battery_indicator[0x7] = pulse_controller_battery == 1 ? ']' : ' ';
+			break;
+		case 0x0: // battery level is 0
+		default:
+			break;
+		}
+
+		res = sce_paf_private_swprintf(&dst[out_len], len, battery_indicator);
 		out_len += res; len -= res;
-		pos_percent_battery = out_len - 1;
+		pos_controller_battery = out_len - 1;
 	}
+
+	/* is_disp_battery */
+	int percent = scePowerGetBatteryLifePercent();
+	if(percent < 0)
+		percent = prev_percent_battery; // for resume
+
+	prev_percent_battery = percent;
+
+	res = sce_paf_private_swprintf(&dst[out_len], len, L" %d%%", percent);
+	out_len += res; len -= res;
+	pos_percent_battery = out_len - 1;
 
 	sce_paf_private_wcsncpy(cached_strings, dst, sizeof(cached_strings) / 2);
 
@@ -153,8 +189,24 @@ int sceSysmoduleLoadModuleInternalWithArg_patch(SceSysmoduleInternalModuleId id,
 	return res;
 }
 
+void pulse_state(int pulse_freq, int pulse_reset)
+{
+	sceRtcGetCurrentTick(&pulse_tick1);
+	pulse_tick0.tick = pulse_tick0.tick > pulse_tick1.tick ? 0 : pulse_tick0.tick;
+	pulse_controller_battery = pulse_controller_battery >= pulse_reset ? 0 : pulse_controller_battery;
+
+	if ((pulse_tick1.tick - pulse_tick0.tick) >= (1000000 / pulse_freq))
+	{
+		pulse_tick0.tick = pulse_tick1.tick;
+		pulse_controller_battery += 1;
+	}
+}
+
 void _start() __attribute__ ((weak, alias("module_start")));
 int module_start(SceSize args, void *argp){
+
+	pulse_tick0.tick = 0;
+	pulse_tick1.tick = 0;
 
 	tai_module_info_t info;
 	info.size = sizeof(info);
