@@ -18,15 +18,17 @@ enable_language(C ASM)
 
 add_executable(${PROJECT_NAME}
   src/main.c
-  src/getCpuUsagePercent.S
   src/taihen_extra.c
 )
 
 target_link_libraries(${PROJECT_NAME}
+  gcc
   SceLibKernel_stub
   SceKernelModulemgr_stub
+  SceCtrl_stub
   ScePaf_stub_weak
   ScePower_stub
+  SceRtc_stub
   taihen_stub
 )
 
