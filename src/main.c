@@ -111,7 +111,7 @@ int scePafGetTimeDataStrings_patch(ScePafDateTime *data, SceWChar16 *dst, SceSiz
 
 		switch (ctrl_battery_level) {
 		case 0xEE: // battery is charging [| | |]
-			pulse_state(32, 3);
+			pulse_state(4, 3);
 			battery_indicator[0x4] = '|';
 			battery_indicator[0x5] = pulse_controller_battery > 1 ? '|' : ' ';
 			battery_indicator[0x6] = pulse_controller_battery > 2 ? '|' : ' ';
@@ -122,7 +122,7 @@ int scePafGetTimeDataStrings_patch(ScePafDateTime *data, SceWChar16 *dst, SceSiz
 			battery_indicator[0x6] = '|';
 			break;
 		case 0x5: // battery level is 5 [|| |]
-			pulse_state(16, 2);
+			pulse_state(2, 2);
 			battery_indicator[0x4] = '|';
 			battery_indicator[0x5] = '|';
 			battery_indicator[0x6] = pulse_controller_battery == 1 ? '|' : ' ';
@@ -133,14 +133,14 @@ int scePafGetTimeDataStrings_patch(ScePafDateTime *data, SceWChar16 *dst, SceSiz
 			battery_indicator[0x6] = ' ';
 			break;
 		case 0x3: // battery level is 3 [| | ]
-			pulse_state(16, 2);
+			pulse_state(2, 2);
 			battery_indicator[0x4] = '|';
 			battery_indicator[0x5] = pulse_controller_battery == 1 ? '|' : ' ';
 			battery_indicator[0x6] = ' ';
 			break;
 		case 0x2: // battery level is 2 [|  ]
 		case 0x1: // battery level is 1 [   ]
-			pulse_state(32, 2);
+			pulse_state(4, 2);
 			battery_indicator[0x1] = pulse_controller_battery == 1 ? 'P' : ' ';
 			battery_indicator[0x2] = pulse_controller_battery == 1 ? '1' : ' ';
 			battery_indicator[0x3] = pulse_controller_battery == 1 ? '[' : ' ';
@@ -195,7 +195,7 @@ void pulse_state(int pulse_freq, int pulse_reset)
 	pulse_tick0.tick = pulse_tick0.tick > pulse_tick1.tick ? 0 : pulse_tick0.tick;
 	pulse_controller_battery = pulse_controller_battery >= pulse_reset ? 0 : pulse_controller_battery;
 
-	if ((pulse_tick1.tick - pulse_tick0.tick) >= (1000000 / pulse_freq))
+	if ((pulse_tick1.tick - pulse_tick0.tick) >= (sceRtcGetTickResolution() / pulse_freq))
 	{
 		pulse_tick0.tick = pulse_tick1.tick;
 		pulse_controller_battery += 1;
